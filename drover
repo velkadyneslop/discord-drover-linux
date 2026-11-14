@@ -1,42 +1,84 @@
 #!/usr/bin/env bash
-# Installer / manager for discord-drover-linux on the Discord Flatpak.
+# Installer / manager for discord-drover-linux.
+# Works with the Discord Flatpak and with native installs (tarball, .deb, RPM).
 set -euo pipefail
 
-APP="${DROVER_APP:-com.discordapp.Discord}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DIR="$HOME/.var/app/$APP/drover"      # visible at the same path inside the sandbox
-LIB="$DIR/libdrover.so"
-INI="$DIR/drover.ini"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+
+FLATPAK_APP="${DROVER_APP:-com.discordapp.Discord}"
+FLATPAK_DIR="$HOME/.var/app/$FLATPAK_APP/drover"   # visible at the same path inside the sandbox
+NATIVE_DIR="$DATA_HOME/discord-drover"
+NATIVE_DESKTOP="$DATA_HOME/applications/discord.desktop"
+MARKER="# managed by discord-drover"
 
 die() { echo "error: $*" >&2; exit 1; }
 
 usage() {
     cat <<USAGE
-Usage: ./drover <command>
+Usage: ./drover [--flatpak|--native] <command>
 
-  install [PROXY]   Build, install and enable for $APP.
+  install [PROXY]   Build, install and enable.
                     PROXY is e.g. socks5://127.0.0.1:1080 or http://user:pass@host:3128.
                     Without PROXY: direct mode (voice fix only, no proxy).
-  proxy PROXY|none  Change the proxy (restart Discord to apply).
-  debug on|off      Log what the library does to $DIR/drover.log
+  proxy PROXY|none  Change the proxy.
+  debug on|off      Log what the library does to drover.log in the install folder.
   status            Show current state.
   uninstall         Disable and remove everything.
 
-Set DROVER_APP=com.discordapp.DiscordCanary to target another build.
+Changes apply the next time Discord starts.
+
+--flatpak / --native choose which Discord to act on. install needs one of them only
+when both kinds are present; the other commands act on wherever drover is installed.
+
+Environment:
+  DROVER_APP       Flatpak app id (default com.discordapp.Discord)
+  DROVER_DISCORD   Path to the native Discord launcher, if it is not found automatically
 USAGE
 }
 
-set_key() { # key value
-    mkdir -p "$DIR"
-    [[ -f "$INI" ]] || printf '[drover]\n' > "$INI"
-    if grep -qiE "^\s*$1\s*=" "$INI"; then
-        local tmp; tmp="$(mktemp)"
-        awk -v k="$1" -v v="$2" 'BEGIN{IGNORECASE=1} $0 ~ "^[ \t]*" k "[ \t]*=" {print k " = " v; next} {print}' "$INI" > "$tmp"
-        cat "$tmp" > "$INI"; rm -f "$tmp"
-    else
-        printf '%s = %s\n' "$1" "$2" >> "$INI"
+dir_of() { if [[ $1 == flatpak ]]; then echo "$FLATPAK_DIR"; else echo "$NATIVE_DIR"; fi; }
+
+# ---------------------------------------------------------------- detection
+
+have_flatpak() { command -v flatpak >/dev/null 2>&1 && flatpak info "$FLATPAK_APP" >/dev/null 2>&1; }
+
+find_native() { # prints the path of the native Discord launcher, if any
+    if [[ -n "${DROVER_DISCORD-}" ]]; then
+        [[ -f "$DROVER_DISCORD" && -x "$DROVER_DISCORD" ]] || die "DROVER_DISCORD='$DROVER_DISCORD' is not an executable file"
+        realpath "$DROVER_DISCORD"; return
     fi
-    chmod 600 "$INI"   # may contain proxy credentials
+    local c
+    for c in "$(command -v discord 2>/dev/null || true)" "$(command -v Discord 2>/dev/null || true)" \
+             /usr/share/discord/Discord /usr/lib64/discord/Discord /usr/lib/discord/Discord \
+             /opt/discord/Discord /opt/Discord/Discord \
+             "$DATA_HOME/Discord/Discord" "$HOME/.local/opt/Discord/Discord" "$HOME/Discord/Discord"; do
+        [[ -n "$c" && -f "$c" && -x "$c" ]] || continue
+        [[ "$c" == "$NATIVE_DIR/"* ]] && continue   # our own wrapper
+        echo "$c"; return
+    done
+}
+
+installed_modes() {
+    local m
+    for m in flatpak native; do [[ -f "$(dir_of "$m")/libdrover.so" ]] && echo "$m"; done
+    return 0
+}
+
+# ------------------------------------------------------------------ settings
+
+set_key() { # dir key value
+    local ini="$1/drover.ini"
+    mkdir -p "$1"
+    [[ -f "$ini" ]] || printf '[drover]\n' > "$ini"
+    if grep -qiE "^\s*$2\s*=" "$ini"; then
+        local tmp; tmp="$(mktemp)"
+        awk -v k="$2" -v v="$3" 'BEGIN{IGNORECASE=1} $0 ~ "^[ \t]*" k "[ \t]*=" {print k " = " v; next} {print}' "$ini" > "$tmp"
+        cat "$tmp" > "$ini"; rm -f "$tmp"
+    else
+        printf '%s = %s\n' "$2" "$3" >> "$ini"
+    fi
+    chmod 600 "$ini"   # may contain proxy credentials
 }
 
 check_proxy() {
@@ -47,62 +89,180 @@ check_proxy() {
     fi
 }
 
-cmd_install() {
-    local proxy="${1-}"
-    check_proxy "$proxy"
-    command -v flatpak >/dev/null || die "flatpak not found"
-    flatpak info "$APP" >/dev/null 2>&1 || die "$APP is not installed (flatpak install flathub $APP)"
-    [[ "$LIB" != *[[:space:]:]* ]] || die "install path '$LIB' contains a space or colon, which LD_PRELOAD cannot handle"
+# ------------------------------------------------------------------- install
 
-    make -C "$SRC" -s libdrover.so
-    mkdir -p "$DIR"
-    install -m 755 "$SRC/libdrover.so" "$LIB"
-    if [[ $# -gt 0 || ! -f "$INI" ]]; then set_key proxy "$proxy"; fi
-
+enable_flatpak() { # lib
     # zypak (the Flatpak Electron launcher) replaces LD_PRELOAD; ZYPAK_LD_PRELOAD is its hook for extra libraries
-    flatpak override --user --unset-env=LD_PRELOAD --env=ZYPAK_LD_PRELOAD="$LIB" "$APP"
+    flatpak override --user --unset-env=LD_PRELOAD --env=ZYPAK_LD_PRELOAD="$1" "$FLATPAK_APP"
 
     # make sure the library actually loads inside the sandbox's runtime
     local out
-    out="$(flatpak run --command=true "$APP" 2>&1)" || die "sandbox test run failed: $out"
+    out="$(flatpak run --env=LD_PRELOAD="$1" --command=true "$FLATPAK_APP" 2>&1)" || die "sandbox test run failed: $out"
     [[ "$out" != *"cannot be preloaded"* ]] || die "library does not load inside the sandbox: $out"
-
-    echo "Installed. Restart Discord (quit it from the tray first) to apply."
-    cmd_status
 }
 
-cmd_status() {
-    if flatpak override --user --show "$APP" 2>/dev/null | grep -q "ZYPAK_LD_PRELOAD=$LIB"; then
-        echo "enabled:  yes ($APP)"
-    else
-        echo "enabled:  no"
+enable_native() { # lib launcher
+    local lib="$1" launcher="$2" wrapper="$NATIVE_DIR/discord" out
+    out="$(LD_PRELOAD="$lib" /bin/true 2>&1)" || true
+    [[ "$out" != *"cannot be preloaded"* ]] || die "library does not load: $out"
+
+    # wrapper that starts the real Discord with the library preloaded
+    {
+        echo '#!/usr/bin/env bash'
+        echo "$MARKER"
+        printf 'export LD_PRELOAD=%q${LD_PRELOAD:+:$LD_PRELOAD}\n' "$lib"
+        printf 'exec %q "$@"\n' "$launcher"
+    } > "$wrapper"
+    chmod 755 "$wrapper"
+
+    # Menu entry: a user-level discord.desktop takes priority over the system one.
+    local source="" c
+    if [[ -f "$NATIVE_DESKTOP" ]] && ! grep -qF "$MARKER" "$NATIVE_DESKTOP"; then
+        cp -p "$NATIVE_DESKTOP" "$NATIVE_DIR/discord.desktop.orig"   # the user's own entry: keep it for uninstall
     fi
-    [[ -f "$LIB" ]] && echo "library:  $LIB" || echo "library:  not installed"
-    if [[ -f "$INI" ]]; then
-        local p; p="$(sed -nE 's/^\s*proxy\s*=\s*(.*)$/\1/ip' "$INI" | tail -1)"
+    for c in "$NATIVE_DIR/discord.desktop.orig" /usr/share/applications/discord.desktop \
+             /usr/local/share/applications/discord.desktop "$(dirname "$(realpath "$launcher")")/discord.desktop"; do
+        [[ -f "$c" ]] && { source="$c"; break; }
+    done
+    mkdir -p "$(dirname "$NATIVE_DESKTOP")"
+    if [[ -n "$source" ]]; then
+        { echo "$MARKER"
+          awk -v w="${wrapper//&/\\\\&}" '/^Exec=/ { sub(/^Exec=("[^"]*"|[^ ]+)/, "Exec=" w) } { print }' "$source"
+        } > "$NATIVE_DESKTOP"
+    else
+        cat > "$NATIVE_DESKTOP" <<DESKTOP
+$MARKER
+[Desktop Entry]
+Name=Discord
+StartupWMClass=discord
+Comment=All-in-one voice and text chat for gamers
+GenericName=Internet Messenger
+Exec=$wrapper
+Icon=discord
+Type=Application
+Categories=Network;InstantMessaging;
+DESKTOP
+    fi
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q "$(dirname "$NATIVE_DESKTOP")" 2>/dev/null || true
+}
+
+cmd_install() { # mode-or-empty [proxy]
+    local mode="$1"; shift
+    local proxy="${1-}" launcher=""
+    check_proxy "$proxy"
+
+    if [[ -z "$mode" ]]; then
+        local f=0; have_flatpak && f=1
+        launcher="$(find_native)"
+        if (( f )) && [[ -n "$launcher" ]]; then
+            die "found both the Flatpak ($FLATPAK_APP) and a native Discord ($launcher); choose with --flatpak or --native"
+        elif (( f )); then mode=flatpak
+        elif [[ -n "$launcher" ]]; then mode=native
+        else die "no Discord found. Install the Flatpak or a native Discord, or point DROVER_DISCORD at the Discord launcher"
+        fi
+    elif [[ $mode == flatpak ]]; then
+        have_flatpak || die "$FLATPAK_APP is not installed (flatpak install flathub $FLATPAK_APP)"
+    else
+        launcher="$(find_native)"
+        [[ -n "$launcher" ]] || die "no native Discord found; set DROVER_DISCORD=/path/to/Discord"
+    fi
+
+    local dir; dir="$(dir_of "$mode")"
+    local lib="$dir/libdrover.so"
+    [[ "$lib" != *[[:space:]:]* ]] || die "install path '$lib' contains a space or colon, which LD_PRELOAD cannot handle"
+
+    make -C "$SRC" -s libdrover.so
+    mkdir -p "$dir"
+    install -m 755 "$SRC/libdrover.so" "$lib"
+    if [[ $# -gt 0 || ! -f "$dir/drover.ini" ]]; then set_key "$dir" proxy "$proxy"; fi
+
+    if [[ $mode == flatpak ]]; then enable_flatpak "$lib"; else enable_native "$lib" "$launcher"; fi
+
+    echo "Installed. Quit Discord completely (from the tray) and start it again to apply."
+    status_one "$mode"
+}
+
+# -------------------------------------------------------------------- status
+
+status_one() { # mode
+    local dir; dir="$(dir_of "$1")"
+    local lib="$dir/libdrover.so" ini="$dir/drover.ini" enabled=no
+    if [[ $1 == flatpak ]]; then
+        echo "target:   Flatpak ($FLATPAK_APP)"
+        local overrides; overrides="$(flatpak override --user --show "$FLATPAK_APP" 2>/dev/null || true)"
+        [[ "$overrides" == *"ZYPAK_LD_PRELOAD=$lib"* ]] && enabled=yes
+    else
+        local target=""
+        [[ -f "$dir/discord" ]] && target="$(sed -nE 's/^exec (.*) "\$@"$/\1/p' "$dir/discord")"
+        echo "target:   native (${target:-unknown})"
+        [[ -x "$dir/discord" && -f "$NATIVE_DESKTOP" ]] && grep -qF "$MARKER" "$NATIVE_DESKTOP" && enabled=yes
+    fi
+    echo "enabled:  $enabled"
+    echo "folder:   $dir"
+    [[ $1 == native && $enabled == yes ]] && echo "launch:   from the app menu, or run $dir/discord"
+    if [[ -f "$ini" ]]; then
+        local p; p="$(sed -nE 's/^\s*proxy\s*=\s*(.*)$/\1/ip' "$ini" | tail -1)"
         p="$(sed -E 's#(://)?[^:/@]+:[^@]+@#\1***:***@#' <<<"$p")"
         echo "proxy:    ${p:-none (direct mode: voice fix only)}"
+        grep -qiE '^\s*debug\s*=\s*1' "$ini" && echo "debug:    on ($dir/drover.log)"
     fi
-    [[ -f "$DIR/drover-packet.bin" ]] && echo "packet:   $DIR/drover-packet.bin ($(stat -c %s "$DIR/drover-packet.bin") bytes)"
+    [[ -f "$dir/drover-packet.bin" ]] && echo "packet:   drover-packet.bin ($(stat -c %s "$dir/drover-packet.bin") bytes)"
     return 0
 }
 
-cmd_uninstall() {
-    flatpak override --user --unset-env=ZYPAK_LD_PRELOAD "$APP" 2>/dev/null || true
-    rm -rf "$DIR"
-    echo "Removed. Restart Discord to apply."
+uninstall_one() { # mode
+    local dir; dir="$(dir_of "$1")"
+    if [[ $1 == flatpak ]]; then
+        flatpak override --user --unset-env=ZYPAK_LD_PRELOAD "$FLATPAK_APP" 2>/dev/null || true
+    else
+        if [[ -f "$NATIVE_DESKTOP" ]] && grep -qF "$MARKER" "$NATIVE_DESKTOP"; then
+            rm -f "$NATIVE_DESKTOP"
+            [[ -f "$dir/discord.desktop.orig" ]] && cp -p "$dir/discord.desktop.orig" "$NATIVE_DESKTOP"
+        fi
+    fi
+    rm -rf "$dir"
+    echo "Removed from the $1 Discord. Restart Discord to apply."
+}
+
+# ---------------------------------------------------------------------- main
+
+MODE=""
+ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --flatpak) MODE=flatpak ;;
+        --native)  MODE=native ;;
+        *)         ARGS+=("$a") ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+# modes the non-install commands act on
+targets() {
+    local list
+    if [[ -n "$MODE" ]]; then list="$MODE"; else list="$(installed_modes)"; fi
+    [[ -n "$list" ]] || die "drover is not installed (run ./drover install)"
+    local m
+    for m in $list; do
+        [[ -f "$(dir_of "$m")/libdrover.so" ]] || die "drover is not installed for the $m Discord"
+        echo "$m"
+    done
 }
 
 case "${1-}" in
-    install)   shift; cmd_install "$@" ;;
+    install)   shift; cmd_install "$MODE" "$@" ;;
     proxy)     [[ $# -eq 2 ]] || die "usage: ./drover proxy PROXY|none"
-               [[ -f "$LIB" ]] || die "not installed"
                p="$2"; [[ "$p" == none ]] && p=""
-               check_proxy "$p"; set_key proxy "$p"; echo "Proxy updated. Restart Discord to apply." ;;
-    debug)     [[ -f "$LIB" ]] || die "not installed"
-               case "${2-}" in on) set_key debug 1 ;; off) set_key debug 0 ;; *) die "usage: ./drover debug on|off" ;; esac
-               echo "Debug logging ${2}. Log file: $DIR/drover.log" ;;
-    status)    cmd_status ;;
-    uninstall) cmd_uninstall ;;
+               check_proxy "$p"
+               for m in $(targets); do set_key "$(dir_of "$m")" proxy "$p"; done
+               echo "Proxy updated. Restart Discord to apply." ;;
+    debug)     case "${2-}" in on) v=1 ;; off) v=0 ;; *) die "usage: ./drover debug on|off" ;; esac
+               for m in $(targets); do set_key "$(dir_of "$m")" debug "$v"; echo "Debug logging $2: $(dir_of "$m")/drover.log"; done
+               echo "Restart Discord to apply." ;;
+    status)    list="$(installed_modes)"; [[ -n "$MODE" ]] && list="$MODE"
+               [[ -n "$list" ]] || { echo "drover is not installed."; exit 0; }
+               first=1
+               for m in $list; do (( first )) || echo; first=0; status_one "$m"; done ;;
+    uninstall) for m in $(targets); do uninstall_one "$m"; done ;;
     *)         usage; [[ -z "${1-}" || "$1" == -h || "$1" == --help ]] || exit 1 ;;
 esac
