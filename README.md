@@ -4,6 +4,9 @@ A Linux port of [Discord Drover](https://github.com/hdrover/discord-drover). It 
 separate build of Discord: a script applies it to the Discord you already have, either the
 Flatpak (`com.discordapp.Discord`) or a native install (tarball, `.deb`, RPM).
 
+This is an unofficial port. It is not affiliated with or endorsed by the author of Discord
+Drover, or by Discord.
+
 It is a small library loaded into Discord that:
 
 - **Fixes blocked voice chat without a proxy ("direct mode").** Just before Discord's
