@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Installer / manager for discord-drover-linux on the Discord Flatpak.
+set -euo pipefail
+
+APP="${DROVER_APP:-com.discordapp.Discord}"
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="$HOME/.var/app/$APP/drover"      # visible at the same path inside the sandbox
+LIB="$DIR/libdrover.so"
+INI="$DIR/drover.ini"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+usage() {
+    cat <<USAGE
+Usage: ./drover <command>
+
+  install [PROXY]   Build, install and enable for $APP.
+                    PROXY is e.g. socks5://127.0.0.1:1080 or http://user:pass@host:3128.
+                    Without PROXY: direct mode (voice fix only, no proxy).
+  proxy PROXY|none  Change the proxy (restart Discord to apply).
+  debug on|off      Log what the library does to $DIR/drover.log
+  status            Show current state.
+  uninstall         Disable and remove everything.
+
+Set DROVER_APP=com.discordapp.DiscordCanary to target another build.
+USAGE
+}
+
+set_key() { # key value
+    mkdir -p "$DIR"
+    [[ -f "$INI" ]] || printf '[drover]\n' > "$INI"
+    if grep -qiE "^\s*$1\s*=" "$INI"; then
+        local tmp; tmp="$(mktemp)"
+        awk -v k="$1" -v v="$2" 'BEGIN{IGNORECASE=1} $0 ~ "^[ \t]*" k "[ \t]*=" {print k " = " v; next} {print}' "$INI" > "$tmp"
+        cat "$tmp" > "$INI"; rm -f "$tmp"
+    else
+        printf '%s = %s\n' "$1" "$2" >> "$INI"
+    fi
+    chmod 600 "$INI"   # may contain proxy credentials
+}
+
+check_proxy() {
+    [[ -z "$1" || "$1" =~ ^((http|https|socks5)://)?([^@[:space:]]+:[^@[:space:]]+@)?[^:@/[:space:]]+:[0-9]+$ ]] ||
+        die "proxy must look like [http|socks5]://[login:password@]host:port"
+    if [[ "$1" =~ ^socks5://.*@ ]]; then
+        echo "warning: Discord (Chromium) cannot authenticate to SOCKS5 proxies; the login will be ignored." >&2
+    fi
+}
+
+cmd_install() {
+    local proxy="${1-}"
+    check_proxy "$proxy"
+    command -v flatpak >/dev/null || die "flatpak not found"
+    flatpak info "$APP" >/dev/null 2>&1 || die "$APP is not installed (flatpak install flathub $APP)"
+    [[ "$LIB" != *[[:space:]:]* ]] || die "install path '$LIB' contains a space or colon, which LD_PRELOAD cannot handle"
+
+    make -C "$SRC" -s libdrover.so
+    mkdir -p "$DIR"
+    install -m 755 "$SRC/libdrover.so" "$LIB"
+    if [[ $# -gt 0 || ! -f "$INI" ]]; then set_key proxy "$proxy"; fi
+
+    # zypak (the Flatpak Electron launcher) replaces LD_PRELOAD; ZYPAK_LD_PRELOAD is its hook for extra libraries
+    flatpak override --user --unset-env=LD_PRELOAD --env=ZYPAK_LD_PRELOAD="$LIB" "$APP"
+
+    # make sure the library actually loads inside the sandbox's runtime
+    local out
+    out="$(flatpak run --command=true "$APP" 2>&1)" || die "sandbox test run failed: $out"
+    [[ "$out" != *"cannot be preloaded"* ]] || die "library does not load inside the sandbox: $out"
+
+    echo "Installed. Restart Discord (quit it from the tray first) to apply."
+    cmd_status
+}
+
+cmd_status() {
+    if flatpak override --user --show "$APP" 2>/dev/null | grep -q "ZYPAK_LD_PRELOAD=$LIB"; then
+        echo "enabled:  yes ($APP)"
+    else
+        echo "enabled:  no"
+    fi
+    [[ -f "$LIB" ]] && echo "library:  $LIB" || echo "library:  not installed"
+    if [[ -f "$INI" ]]; then
+        local p; p="$(sed -nE 's/^\s*proxy\s*=\s*(.*)$/\1/ip' "$INI" | tail -1)"
+        p="$(sed -E 's#(://)?[^:/@]+:[^@]+@#\1***:***@#' <<<"$p")"
+        echo "proxy:    ${p:-none (direct mode: voice fix only)}"
+    fi
+    [[ -f "$DIR/drover-packet.bin" ]] && echo "packet:   $DIR/drover-packet.bin ($(stat -c %s "$DIR/drover-packet.bin") bytes)"
+    return 0
+}
+
+cmd_uninstall() {
+    flatpak override --user --unset-env=ZYPAK_LD_PRELOAD "$APP" 2>/dev/null || true
+    rm -rf "$DIR"
+    echo "Removed. Restart Discord to apply."
+}
+
+case "${1-}" in
+    install)   shift; cmd_install "$@" ;;
+    proxy)     [[ $# -eq 2 ]] || die "usage: ./drover proxy PROXY|none"
+               [[ -f "$LIB" ]] || die "not installed"
+               p="$2"; [[ "$p" == none ]] && p=""
+               check_proxy "$p"; set_key proxy "$p"; echo "Proxy updated. Restart Discord to apply." ;;
+    debug)     [[ -f "$LIB" ]] || die "not installed"
+               case "${2-}" in on) set_key debug 1 ;; off) set_key debug 0 ;; *) die "usage: ./drover debug on|off" ;; esac
+               echo "Debug logging ${2}. Log file: $DIR/drover.log" ;;
+    status)    cmd_status ;;
+    uninstall) cmd_uninstall ;;
+    *)         usage; [[ -z "${1-}" || "$1" == -h || "$1" == --help ]] || exit 1 ;;
+esac
