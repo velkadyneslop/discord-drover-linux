@@ -148,3 +148,8 @@ argument injection.
 
 Based on the behaviour of [hdrover/discord-drover](https://github.com/hdrover/discord-drover)
 for Windows.
+
+## Licence
+
+Public domain, under the [Unlicense](UNLICENSE). This covers the code in this repository
+only; upstream Discord Drover is a separate project with its own terms.
