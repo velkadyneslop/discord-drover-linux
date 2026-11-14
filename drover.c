@@ -3,12 +3,14 @@
  *
  * What it does, per process it is loaded into:
  *   1. Main Discord process only: inserts --proxy-server=<proxy> into argv
- *      (TCP: chat, updates, voice signalling).
+ *      (TCP: chat, updates, voice signalling). http://, https:// (TLS to the
+ *      proxy, done by Chromium) and socks5:// are passed through as given.
  *   2. First send on every UDP socket: if the datagram is 74 bytes (Discord's
  *      voice IP-discovery packet), first sends the optional drover-packet.bin,
  *      then two 1-byte datagrams (0x00, 0x01), waits 50 ms, then lets the real
  *      packet through.
- *   3. HTTP proxy with login:password: rewrites the first request sent on a
+ *   3. Plain HTTP proxy with login:password (not https://, where the request
+ *      is already encrypted by the time it reaches send()): rewrites the first request sent on a
  *      TCP socket so the User-Agent header becomes Proxy-Authorization
  *      (Chromium cannot take proxy credentials on the command line).
  *
@@ -154,8 +156,6 @@ static void parse_proxy(char *url)
         memcpy(proxy.scheme, url, n);
         proxy.scheme[n] = 0;
         lower(proxy.scheme);
-        if (!strcmp(proxy.scheme, "https"))
-            strcpy(proxy.scheme, "http");
         rest = sep + 3;
     }
 

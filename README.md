@@ -10,8 +10,8 @@ It is a small library loaded into Discord that:
   first voice packet on each connection, it sends two 1-byte junk packets and waits
   50 ms. On networks that block Discord voice by inspecting traffic, this is often
   enough for calls and screen sharing to connect.
-- **Optionally forces Discord through a proxy** (HTTP or SOCKS5) for everything except
-  voice: chat, login, voice signalling.
+- **Optionally forces Discord through a proxy** (HTTP, HTTPS or SOCKS5) for everything
+  except voice: chat, login, voice signalling.
 - **Supports HTTP proxies with a login and password**, which Discord cannot do by itself.
 
 Nothing is installed system-wide and no root is needed. It only affects Discord.
@@ -59,8 +59,14 @@ it. So:
 
 Changes take effect the next time Discord starts.
 
-Proxy format: `[http|socks5]://[login:password@]host:port`. Logins only work with HTTP
-proxies; Discord cannot authenticate to SOCKS5 proxies.
+Proxy format: `[http|https|socks5]://[login:password@]host:port`.
+
+- `http://` and `socks5://` proxies are unencrypted wrappers: anyone between you and the
+  proxy can see which Discord hosts you connect to. Fine for a proxy on `127.0.0.1`.
+- `https://` encrypts the connection to the proxy itself, hiding those hosts (and the fact
+  that it is Discord) from your local network.
+- Logins only work with plain `http://` proxies. Discord cannot authenticate to SOCKS5
+  proxies, and the login trick cannot work inside the encrypted `https://` connection.
 
 `--flatpak` or `--native` before any command limits it to that Discord. To target another
 Flatpak build, set `DROVER_APP`, e.g. `DROVER_APP=com.discordapp.DiscordCanary ./drover install`.
@@ -119,6 +125,8 @@ tail ~/.local/share/discord-drover/drover.log               # native
   Upstream needs these for Discord's separate updater. The Flatpak disables that updater;
   on native installs it runs, and **proxy mode does not cover it** (see Limitations).
 - `drover.ini` has an extra `debug` setting.
+- `https://` proxies are passed through to Discord as HTTPS proxies. Upstream treats
+  `https://` as plain `http://`.
 
 ## Limitations
 
@@ -129,7 +137,8 @@ tail ~/.local/share/discord-drover/drover.log               # native
   servers are blocked on your network, native Discord may fail to install or update even
   with a proxy set. Direct mode is not affected.
 - Proxy mode and proxy logins pass the local tests but have not been tried against a
-  real proxy.
+  real proxy. `https://` proxies in particular are only tested as far as the flag Discord
+  is started with.
 - It only helps against blocks that inspect traffic. If Discord's addresses are blocked
   outright, a proxy or VPN is needed.
 - It adds no privacy: your network can still see that you are using Discord.

@@ -114,6 +114,8 @@ def test_auth(d):
     check("no credentials: CONNECT untouched", roundtrip(connect) == connect.encode() * 2)
     write_ini(d, "socks5://user:s3cret@127.0.0.1:1080")
     check("socks5: CONNECT untouched", roundtrip(connect) == connect.encode() * 2)
+    write_ini(d, "https://user:s3cret@127.0.0.1:443")
+    check("https proxy: no rewrite (traffic to the proxy is TLS)", roundtrip(connect) == connect.encode() * 2)
 
 
 def test_argv(d):
@@ -134,6 +136,11 @@ def test_argv(d):
     check("argv: child processes untouched", args(exe, "--type=renderer") == ["--type=renderer"])
     check("argv: existing --proxy-server respected", args(exe, "--proxy-server=x") == ["--proxy-server=x"])
     check("argv: other programs untouched", args(other, "--foo") == ["--foo"])
+    write_ini(d, "https://user:pw@proxy.example:443")
+    check("argv: https proxy passed through (credentials stripped)",
+          args(exe) == ["--proxy-server=https://proxy.example:443"])
+    write_ini(d, "HTTP://127.0.0.1:3128")
+    check("argv: scheme is case-insensitive", args(exe) == ["--proxy-server=http://127.0.0.1:3128"])
     write_ini(d, "127.0.0.1:8080")
     check("argv: scheme defaults to http", args(exe) == ["--proxy-server=http://127.0.0.1:8080"])
     write_ini(d, "")

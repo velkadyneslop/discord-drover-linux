@@ -19,7 +19,8 @@ usage() {
 Usage: ./drover [--flatpak|--native] <command>
 
   install [PROXY]   Build, install and enable.
-                    PROXY is e.g. socks5://127.0.0.1:1080 or http://user:pass@host:3128.
+                    PROXY is e.g. socks5://127.0.0.1:1080, http://user:pass@host:3128
+                    or https://host:443 (encrypted connection to the proxy).
                     Without PROXY: direct mode (voice fix only, no proxy).
   proxy PROXY|none  Change the proxy.
   debug on|off      Log what the library does to drover.log in the install folder.
@@ -83,9 +84,11 @@ set_key() { # dir key value
 
 check_proxy() {
     [[ -z "$1" || "$1" =~ ^((http|https|socks5)://)?([^@[:space:]]+:[^@[:space:]]+@)?[^:@/[:space:]]+:[0-9]+$ ]] ||
-        die "proxy must look like [http|socks5]://[login:password@]host:port"
+        die "proxy must look like [http|https|socks5]://[login:password@]host:port"
     if [[ "$1" =~ ^socks5://.*@ ]]; then
         echo "warning: Discord (Chromium) cannot authenticate to SOCKS5 proxies; the login will be ignored." >&2
+    elif [[ "$1" =~ ^https://.*@ ]]; then
+        echo "warning: logins are not supported for https:// proxies; the login will be ignored." >&2
     fi
 }
 
